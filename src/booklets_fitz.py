@@ -9,25 +9,27 @@ def get_content_bbox(page):
     rects = [fitz.Rect(b["bbox"]) for b in blocks if "bbox" in b]
 
     if not rects:
+        # No content blocks, use entire page
+        print(f"ℹ️ No content blocks found, using full page rect")
         return page.rect
 
     bbox = rects[0]
     for r in rects[1:]:
         bbox |= r
 
-    margin = 5
+    margin = 5  # points
     bbox = bbox + (-margin, -margin, margin, margin)
-    bbox = bbox & page.rect
+    bbox = bbox & page.rect  # intersect with page
 
-    # 👇 Validamos que el bbox no sea absurdamente pequeño
-    MIN_SIZE_THRESHOLD = 50  # en puntos (~1.7cm)
+    MIN_SIZE_THRESHOLD = 50  # points (~1.7cm)
+
     if bbox.width < MIN_SIZE_THRESHOLD or bbox.height < MIN_SIZE_THRESHOLD:
-        return page.rect  # usamos toda la página si el contenido es sospechosamente pequeño
+        print(f"⚠️ Small bbox detected (w={bbox.width:.1f}, h={bbox.height:.1f}), using full page rect")
+        return page.rect
 
     return bbox
 
 def add_watermark_to_first_page(doc):
-    """Añade un asterisco '*' en la esquina superior derecha de la primera página del documento."""
     if len(doc) == 0:
         return
 
@@ -37,8 +39,15 @@ def add_watermark_to_first_page(doc):
     margin = 20
     text_width = fitz.get_text_length(text, fontname="helv", fontsize=font_size)
     x = page.rect.width - text_width - margin
-    y = margin + font_size  # Ajustamos para que el texto quede dentro del margen superior
+    y = margin + font_size
     page.insert_text((x, y), text, fontsize=font_size, fontname="helv", color=(0, 0, 0))
+
+def scale_factor(rect, max_w, max_h, min_scale=0.3):
+    scale = min(max_w / rect.width, max_h / rect.height, 1.0)
+    if scale < min_scale:
+        print(f"⚠️ Scale factor too small ({scale:.2f}), using min_scale={min_scale}")
+        return min_scale
+    return scale
 
 def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark=False):
     print(f"📄 Opening input PDF: {input_pdf_path}")
@@ -85,12 +94,8 @@ def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark
         left_bbox = get_content_bbox(left_page)
         right_bbox = get_content_bbox(right_page)
 
-        def scale_factor(rect, max_w, max_h):
-            scale = min(max_w / rect.width, max_h / rect.height)
-            return min(scale, 1.0)
-
-        left_scale = scale_factor(left_bbox, avail_width, avail_height)
-        right_scale = scale_factor(right_bbox, avail_width, avail_height)
+        left_scale = scale_factor(left_bbox, avail_width, avail_height, min_scale=0.3)
+        right_scale = scale_factor(right_bbox, avail_width, avail_height, min_scale=0.3)
 
         left_w = left_bbox.width * left_scale
         left_h = left_bbox.height * left_scale
@@ -107,7 +112,7 @@ def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark
         rotate_degrees = 180 if idx % 2 == 0 else 0
 
         if rotate_degrees == 180:
-            # Al rotar 180°, intercambia posiciones para que las páginas queden en orden correcto
+            # Rotated page positions swapped for correct reading order
             try:
                 new_page.show_pdf_page(right_dest, doc, left_idx, clip=left_bbox, rotate=rotate_degrees)
             except Exception as e:
