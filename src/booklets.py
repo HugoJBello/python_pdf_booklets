@@ -1,194 +1,146 @@
-import sys
+import fitz
+import argparse
 import os
-from io import BytesIO
-from PyPDF2 import PdfReader, PdfWriter, PageObject, Transformation
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4, landscape
+import sys
+from pathlib import Path
 
-PAGE_SIZE = landscape(A4)  # tamaño A4 apaisado
-#MARGIN_CM = 1.0
-MARGIN_CM = 0.0
-MARGIN_PT = MARGIN_CM * 28.35  # 1 cm en puntos PDF (~28.35 pts)
+def detect_content_bbox(page, margin_pts):
+    blocks = page.get_text("blocks")
+    if not blocks:
+        # Página sin texto, devuelve toda la página
+        return page.rect
+    x0 = min(b[0] for b in blocks)
+    y0 = min(b[1] for b in blocks)
+    x1 = max(b[2] for b in blocks)
+    y1 = max(b[3] for b in blocks)
+    bbox = fitz.Rect(x0, y0, x1, y1)
 
-def create_blank_half_page(width, height):
-    """
-    Crea una página en blanco con tamaño dado (se usa para rellenar).
-    """
-    packet = BytesIO()
-    can = canvas.Canvas(packet, pagesize=(width, height))
-    can.showPage()
-    can.save()
-    packet.seek(0)
-    blank_pdf = PdfReader(packet)
-    return blank_pdf.pages[0]
-
-def crop_page_remove_original_margin(page, original_margin_pts=15 * 28.35 / 10, final_margin_pts=MARGIN_PT):
-    """
-    Recorta la página para quitar margen original más grande,
-    y luego dejar final_margin_pts alrededor.
-    original_margin_pts: margen a recortar para eliminar borde original (aprox 1.5 cm)
-    final_margin_pts: margen que queremos dejar en el resultado final (1 cm)
-    """
-    media_box = page.mediabox
-
-    # Primero recortamos margen original (más amplio)
-    llx = float(media_box.left) + original_margin_pts
-    lly = float(media_box.bottom) + original_margin_pts
-    urx = float(media_box.right) - original_margin_pts
-    ury = float(media_box.top) - original_margin_pts
-
-    # Luego ajustamos para dejar solo final_margin_pts de margen
-    rec_margin = original_margin_pts - final_margin_pts
-    if rec_margin < 0:
-        rec_margin = 0  # no recortar más si es negativo
-
-    llx += rec_margin
-    lly += rec_margin
-    urx -= rec_margin
-    ury -= rec_margin
-
-    # Evitar que quede inválido
-    if urx <= llx or ury <= lly:
-        return page
-
-    page.mediabox.lower_left = (llx, lly)
-    page.mediabox.upper_right = (urx, ury)
-
-    if page.cropbox:
-        page.cropbox.lower_left = (llx, lly)
-        page.cropbox.upper_right = (urx, ury)
-
-    return page
-
-def merge_two_pages(page1, page2, page_size=PAGE_SIZE, margin_pts=MARGIN_PT):
-    width, height = page_size
-    half_width = width / 2
-
-    new_page = PageObject.create_blank_page(width=width, height=height)
-
-    def prepare_page(page):
-        # Guardamos caja original
-        media_box = page.mediabox
-        orig_llx = float(media_box.left)
-        orig_lly = float(media_box.bottom)
-        orig_urx = float(media_box.right)
-        orig_ury = float(media_box.top)
-
-        # Recortamos para eliminar margen original + dejar margen final
-        cropped_page = crop_page_remove_original_margin(page, original_margin_pts=15 * 28.35 / 10, final_margin_pts=margin_pts)
-        cropped_media_box = cropped_page.mediabox
-        crop_llx = float(cropped_media_box.left)
-        crop_lly = float(cropped_media_box.bottom)
-        crop_urx = float(cropped_media_box.right)
-        crop_ury = float(cropped_media_box.top)
-
-        # Tamaño del contenido visible (después de recorte)
-        content_width = crop_urx - crop_llx
-        content_height = crop_ury - crop_lly
-
-        return cropped_page, content_width, content_height, crop_llx, crop_lly
-
-    # Preparamos ambas páginas
-    cpage1, cw1, ch1, cllx1, clly1 = prepare_page(page1)
-    cpage2, cw2, ch2, cllx2, clly2 = prepare_page(page2)
-
-    # Calculamos escala para que quepa en mitad de página apaisada
-    scale1 = min(half_width / cw1, height / ch1)
-    scale2 = min(half_width / cw2, height / ch2)
-
-    # Para centrar cada página en su mitad, calculamos traducción
-    tx1 = (half_width - cw1 * scale1) / 2
-    ty1 = (height - ch1 * scale1) / 2
-
-    tx2 = half_width + (half_width - cw2 * scale2) / 2
-    ty2 = (height - ch2 * scale2) / 2
-
-    # Creamos páginas temporales en blanco para aplicar transformaciones
-    temp_page1 = PageObject.create_blank_page(width=width, height=height)
-    temp_page1.merge_page(cpage1)
-    temp_page1.add_transformation(
-        Transformation()
-        .translate(tx=-cllx1, ty=-clly1)
-        .scale(scale1, scale1)
-        .translate(tx=tx1, ty=ty1)
+    clip_rect = fitz.Rect(
+        max(bbox.x0 - margin_pts, 0),
+        max(bbox.y0 - margin_pts, 0),
+        min(bbox.x1 + margin_pts, page.rect.width),
+        min(bbox.y1 + margin_pts, page.rect.height),
     )
 
-    temp_page2 = PageObject.create_blank_page(width=width, height=height)
-    temp_page2.merge_page(cpage2)
-    temp_page2.add_transformation(
-        Transformation()
-        .translate(tx=-cllx2, ty=-clly2)
-        .scale(scale2, scale2)
-        .translate(tx=tx2, ty=ty2)
-    )
+    if clip_rect.is_empty or clip_rect.width <= 0 or clip_rect.height <= 0:
+        return page.rect
+    return clip_rect
 
-    # Mezclamos las dos páginas en la nueva página combinada
-    new_page.merge_page(temp_page1)
-    new_page.merge_page(temp_page2)
-
-    return new_page
-
-def rotate_booklet_pages(writer):
-    for i, page in enumerate(writer.pages):
-        if i % 2 == 0:  # rotar páginas con índice par: 0, 2, 4, ...
-            page.rotate(180)
-
-def create_booklet(input_path, output_path):
-    reader = PdfReader(input_path)
-    pages = list(reader.pages)
-
-    if not pages:
-        print("❌ El PDF de entrada no contiene páginas.")
+def add_watermark_to_first_page(doc):
+    if len(doc) == 0:
         return
+    page = doc[0]
+    text = "*"
+    font_size = 20
+    margin = 20
+    text_width = fitz.get_text_length(text, fontname="helv", fontsize=font_size)
+    x = page.rect.width - text_width - margin
+    y = margin + font_size
+    page.insert_text((x, y), text, fontsize=font_size, fontname="helv", color=(0, 0, 0))
 
-    width = float(pages[0].mediabox.width)
-    height = float(pages[0].mediabox.height)
-    blank = create_blank_half_page(width, height)
 
-    while len(pages) % 4 != 0:
-        pages.append(blank)
+def create_booklet(input_pdf_path: str, output_pdf_path: str, margin_cm=0.5, add_watermark=False):
+    margin_pts = margin_cm * 72 / 2.54  # convertir cm a puntos
+    doc_in = fitz.open(input_pdf_path)
+    doc_out = fitz.open()
 
-    total = len(pages)
-    print(f"Total páginas (con relleno): {total}")
+    # A4 horizontal (landscape)
+    out_width = 842  # ancho A4 pts (horizontal)
+    out_height = 595  # alto A4 pts (horizontal)
+    margin_out = margin_pts
 
-    booklet_order = []
+    total_pages = doc_in.page_count
+    while total_pages % 4 != 0:
+        doc_in.insert_page(-1)  # añadir página en blanco al final
+        total_pages += 1
 
-    for i in range(total // 4):
-        left1 = pages[total - 1 - 2 * i]
-        right1 = pages[2 * i]
-        booklet_order.append((left1, right1))
+    left_pages = list(range(total_pages - 1, total_pages // 2 - 1, -1))
+    right_pages = list(range(0, total_pages // 2))
 
-        left2 = pages[2 * i + 1]
-        right2 = pages[total - 2 - 2 * i]
-        booklet_order.append((left2, right2))
+    for i, (left_idx, right_idx) in enumerate(zip(left_pages, right_pages), start=1):
+        page_out = doc_out.new_page(width=out_width, height=out_height)
 
-    print(f"Total pares de páginas combinadas: {len(booklet_order)}")
+        page_left = doc_in[left_idx]
+        page_right = doc_in[right_idx]
 
-    writer = PdfWriter()
+        bbox_left = detect_content_bbox(page_left, margin_pts)
+        bbox_right = detect_content_bbox(page_right, margin_pts)
 
-    for idx, (left, right) in enumerate(booklet_order, 1):
-        print(f"Procesando hoja {idx}/{len(booklet_order)}")
-        combined = merge_two_pages(left, right, page_size=PAGE_SIZE, margin_pts=MARGIN_PT)
-        writer.add_page(combined)
+        col_width = (out_width - 3 * margin_out) / 2
+        col_height = out_height - 2 * margin_out
 
-    rotate_booklet_pages(writer)
+        # Si la página salida es impar, rotamos ambas 180 grados
+        rot_left = (page_left.rotation + 180) % 360 if i % 2 == 1 else page_left.rotation
+        rot_right = (page_right.rotation + 180) % 360 if i % 2 == 1 else page_right.rotation
 
-    with open(output_path, "wb") as f:
-        writer.write(f)
+        def place_page(page_in, bbox, x_pos, y_pos, rotation):
+            scale = min(col_width / bbox.width, col_height / bbox.height)
+            w_scaled = bbox.width * scale
+            h_scaled = bbox.height * scale
+            x_draw = x_pos + (col_width - w_scaled) / 2
+            y_draw = y_pos + (col_height - h_scaled) / 2
 
-    print(f"✅ Booklet generado correctamente: {output_path}")
+            try:
+                page_out.show_pdf_page(
+                    fitz.Rect(x_draw, y_draw, x_draw + w_scaled, y_draw + h_scaled),
+                    doc_in,
+                    page_in.number,
+                    clip=bbox if bbox != page_in.rect else None,
+                    rotate=rotation,
+                )
+            except ValueError:
+                try:
+                    page_out.show_pdf_page(
+                        fitz.Rect(x_pos, y_pos, x_pos + col_width, y_pos + col_height),
+                        doc_in,
+                        page_in.number,
+                        rotate=rotation,
+                    )
+                except ValueError:
+                    # Página vacía: rellena con blanco
+                    page_out.draw_rect(
+                        fitz.Rect(x_pos, y_pos, x_pos + col_width, y_pos + col_height),
+                        color=(1, 1, 1), fill=(1, 1, 1)
+                    )
+
+        # Intercambiamos posición derecha <-> izquierda
+        place_page(page_right, bbox_right, margin_out, margin_out, rot_right)            # derecha a la izquierda
+        place_page(page_left, bbox_left, margin_out * 2 + col_width, margin_out, rot_left)  # izquierda a la derecha
+
+        if add_watermark:
+            add_watermark_to_first_page(doc_out)
+
+
+    doc_out.save(output_pdf_path)
+    doc_out.close()
+    doc_in.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="Generar un folleto (booklet) a partir de un PDF.")
+    parser.add_argument("input_pdf", help="Ruta al archivo PDF de entrada.")
+    parser.add_argument("--output", "-o", type=str, help="Ruta al archivo PDF de salida.")
+    parser.add_argument("--margin", "-m", type=float, default=1.0, help="Margen en cm a dejar (default: 1.0).")
+    parser.add_argument("--add_watermark", "-w", action="store_true", help="Añadir marca de agua en la primera página.")
+
+    args = parser.parse_args()
+
+    input_pdf = args.input_pdf
+    margin_cm = args.margin
+    add_watermark = args.add_watermark
+
+    if not os.path.isfile(input_pdf):
+        print(f"Error: No se encontró el archivo: {input_pdf}")
+        sys.exit(1)
+
+    if args.output:
+        output_pdf = args.output
+    else:
+        base_name = os.path.splitext(os.path.basename(input_pdf))[0]
+        output_pdf = f"{base_name}_booklet.pdf"
+
+    print("Creando folleto PDF...")
+    create_booklet(input_pdf, output_pdf, margin_cm=margin_cm, add_watermark=add_watermark)
+    print(f"Folleto generado en: {output_pdf}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Uso: python booklet.py entrada.pdf salida.pdf")
-        sys.exit(1)
-
-    entrada = sys.argv[1]
-    salida = sys.argv[2]
-
-    if not os.path.isfile(entrada):
-        print(f"❌ Archivo no encontrado: {entrada}")
-        sys.exit(1)
-
-    create_booklet(entrada, salida)
-
+    main()
