@@ -4,7 +4,8 @@ from pathlib import Path
 def detect_content_bbox(page, margin_pts):
     blocks = page.get_text("blocks")
     if not blocks:
-        return None  # Página vacía
+        # Página sin texto, devuelve toda la página
+        return page.rect
     x0 = min(b[0] for b in blocks)
     y0 = min(b[1] for b in blocks)
     x1 = max(b[2] for b in blocks)
@@ -22,6 +23,19 @@ def detect_content_bbox(page, margin_pts):
         return page.rect
     return clip_rect
 
+def add_watermark_to_first_page(doc):
+    if len(doc) == 0:
+        return
+    page = doc[0]
+    text = "*"
+    font_size = 20
+    margin = 20
+    text_width = fitz.get_text_length(text, fontname="helv", fontsize=font_size)
+    x = page.rect.width - text_width - margin
+    y = margin + font_size
+    page.insert_text((x, y), text, fontsize=font_size, fontname="helv", color=(0, 0, 0))
+
+
 def create_booklet(input_pdf_path: str, output_pdf_path: str, margin_cm=0.5, add_watermark=False):
     margin_pts = margin_cm * 72 / 2.54  # convertir cm a puntos
     doc_in = fitz.open(input_pdf_path)
@@ -34,13 +48,13 @@ def create_booklet(input_pdf_path: str, output_pdf_path: str, margin_cm=0.5, add
 
     total_pages = doc_in.page_count
     while total_pages % 4 != 0:
-        doc_in.insert_page(-1)  # añadir página en blanco
+        doc_in.insert_page(-1)  # añadir página en blanco al final
         total_pages += 1
 
     left_pages = list(range(total_pages - 1, total_pages // 2 - 1, -1))
     right_pages = list(range(0, total_pages // 2))
 
-    for left_idx, right_idx in zip(left_pages, right_pages):
+    for i, (left_idx, right_idx) in enumerate(zip(left_pages, right_pages), start=1):
         page_out = doc_out.new_page(width=out_width, height=out_height)
 
         page_left = doc_in[left_idx]
@@ -52,15 +66,11 @@ def create_booklet(input_pdf_path: str, output_pdf_path: str, margin_cm=0.5, add
         col_width = (out_width - 3 * margin_out) / 2
         col_height = out_height - 2 * margin_out
 
-        def place_page(page_in, bbox, x_pos, y_pos):
-            if bbox is None:
-                # Página vacía: pinta blanco
-                page_out.draw_rect(
-                    fitz.Rect(x_pos, y_pos, x_pos + col_width, y_pos + col_height),
-                    color=(1,1,1), fill=(1,1,1)
-                )
-                return
+        # Si la página salida es impar, rotamos ambas 180 grados
+        rot_left = (page_left.rotation + 180) % 360 if i % 2 == 1 else page_left.rotation
+        rot_right = (page_right.rotation + 180) % 360 if i % 2 == 1 else page_right.rotation
 
+        def place_page(page_in, bbox, x_pos, y_pos, rotation):
             scale = min(col_width / bbox.width, col_height / bbox.height)
             w_scaled = bbox.width * scale
             h_scaled = bbox.height * scale
@@ -73,28 +83,30 @@ def create_booklet(input_pdf_path: str, output_pdf_path: str, margin_cm=0.5, add
                     doc_in,
                     page_in.number,
                     clip=bbox if bbox != page_in.rect else None,
-                    rotate=page_in.rotation,
+                    rotate=rotation,
                 )
             except ValueError:
                 try:
                     page_out.show_pdf_page(
-                        fitz.Rect(x_draw, y_draw, x_draw + col_width, y_draw + col_height),
+                        fitz.Rect(x_pos, y_pos, x_pos + col_width, y_pos + col_height),
                         doc_in,
                         page_in.number,
-                        rotate=page_in.rotation,
+                        rotate=rotation,
                     )
                 except ValueError:
+                    # Página vacía: rellena con blanco
                     page_out.draw_rect(
                         fitz.Rect(x_pos, y_pos, x_pos + col_width, y_pos + col_height),
-                        color=(1,1,1), fill=(1,1,1)
+                        color=(1, 1, 1), fill=(1, 1, 1)
                     )
 
-        place_page(page_left, bbox_left, margin_out, margin_out)
-        place_page(page_right, bbox_right, margin_out * 2 + col_width, margin_out)
+        # Intercambiamos posición derecha <-> izquierda
+        place_page(page_right, bbox_right, margin_out, margin_out, rot_right)            # derecha a la izquierda
+        place_page(page_left, bbox_left, margin_out * 2 + col_width, margin_out, rot_left)  # izquierda a la derecha
 
         if add_watermark:
-            # Aquí se podría añadir marca de agua si se desea
-            pass
+            add_watermark_to_first_page(doc_out)
+
 
     doc_out.save(output_pdf_path)
     doc_out.close()
