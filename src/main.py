@@ -7,7 +7,9 @@ import argparse
 BASE_DIR = os.path.dirname(__file__)
 sys.path.insert(0, BASE_DIR)
 
-from booklets_fitz import create_booklet
+#from booklets_fitz import create_booklet
+from booklets_pdfrw import create_booklet
+
 from split_pdf import split_pdf
 
 DATA_DIR = os.path.join(BASE_DIR, "..", "data")

@@ -4,35 +4,26 @@ import fitz  # PyMuPDF
 def cm_to_pt(cm):
     return cm * 28.35
 
-def get_content_bbox(page):
-    blocks = page.get_text("dict").get("blocks", [])
-    rects = [fitz.Rect(b["bbox"]) for b in blocks if "bbox" in b]
-
-    if not rects:
-        # No content blocks, use entire page
-        print(f"ℹ️ No content blocks found, using full page rect")
-        return page.rect
-
-    bbox = rects[0]
-    for r in rects[1:]:
-        bbox |= r
-
-    margin = 5  # points
-    bbox = bbox + (-margin, -margin, margin, margin)
-    bbox = bbox & page.rect  # intersect with page
-
-    MIN_SIZE_THRESHOLD = 50  # points (~1.7cm)
-
-    if bbox.width < MIN_SIZE_THRESHOLD or bbox.height < MIN_SIZE_THRESHOLD:
-        print(f"⚠️ Small bbox detected (w={bbox.width:.1f}, h={bbox.height:.1f}), using full page rect")
-        return page.rect
-
-    return bbox
+def get_valid_bbox(page):
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+        rects = [fitz.Rect(b["bbox"]) for b in blocks if "bbox" in b and b.get("type") == 0]
+        if not rects:
+            return None
+        bbox = rects[0]
+        for r in rects[1:]:
+            bbox |= r
+        bbox = bbox + (-5, -5, 5, 5)
+        bbox = bbox & page.rect
+        if bbox.width < 30 or bbox.height < 30:
+            return None
+        return bbox
+    except Exception:
+        return None
 
 def add_watermark_to_first_page(doc):
     if len(doc) == 0:
         return
-
     page = doc[0]
     text = "*"
     font_size = 20
@@ -42,13 +33,6 @@ def add_watermark_to_first_page(doc):
     y = margin + font_size
     page.insert_text((x, y), text, fontsize=font_size, fontname="helv", color=(0, 0, 0))
 
-def scale_factor(rect, max_w, max_h, min_scale=0.3):
-    scale = min(max_w / rect.width, max_h / rect.height, 1.0)
-    if scale < min_scale:
-        print(f"⚠️ Scale factor too small ({scale:.2f}), using min_scale={min_scale}")
-        return min_scale
-    return scale
-
 def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark=False):
     print(f"📄 Opening input PDF: {input_pdf_path}")
     doc = fitz.open(input_pdf_path)
@@ -57,20 +41,20 @@ def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark
 
     pages_to_add = (4 - num_pages % 4) % 4
     if pages_to_add > 0:
-        print(f"➕ Adding {pages_to_add} blank page(s) to make total a multiple of 4")
+        print(f"➕ Adding {pages_to_add} blank page(s)")
         for _ in range(pages_to_add):
             doc.insert_page(-1, width=doc[0].rect.width, height=doc[0].rect.height)
         num_pages = doc.page_count
-        print(f"🔄 New page count: {num_pages}")
 
     margin = cm_to_pt(margin_cm)
     a4_width, a4_height = fitz.paper_size("a4")
     if a4_width < a4_height:
         a4_width, a4_height = a4_height, a4_width
 
-    print(f"📐 Output page size: {a4_width:.2f} x {a4_height:.2f} pts (A4 landscape)")
+    print(f"📐 Output size: {a4_width:.2f} x {a4_height:.2f} pts")
     booklet_doc = fitz.open()
 
+    # Cálculo de pares de páginas para folleto
     pairs = []
     for i in range(num_pages // 4):
         left1 = num_pages - 1 - 2 * i
@@ -79,8 +63,6 @@ def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark
         right2 = num_pages - 2 - 2 * i
         pairs.append((left1, right1))
         pairs.append((left2, right2))
-
-    print(f"🔧 Creating {len(pairs)} booklet pages (each with 2 original pages)...")
 
     for idx, (left_idx, right_idx) in enumerate(pairs):
         left_page = doc.load_page(left_idx)
@@ -91,58 +73,56 @@ def create_booklet(input_pdf_path, output_pdf_path, margin_cm=1.0, add_watermark
         avail_width = half_width - 2 * margin
         avail_height = a4_height - 2 * margin
 
-        left_bbox = get_content_bbox(left_page)
-        right_bbox = get_content_bbox(right_page)
+        left_bbox = get_valid_bbox(left_page)
+        right_bbox = get_valid_bbox(right_page)
 
-        left_scale = scale_factor(left_bbox, avail_width, avail_height, min_scale=0.3)
-        right_scale = scale_factor(right_bbox, avail_width, avail_height, min_scale=0.3)
+        use_clip_left = left_bbox is not None
+        use_clip_right = right_bbox is not None
 
-        left_w = left_bbox.width * left_scale
-        left_h = left_bbox.height * left_scale
-        left_x = margin + (half_width - 2 * margin - left_w) / 2
-        left_y = margin + (avail_height - left_h) / 2
-        left_dest = fitz.Rect(left_x, left_y, left_x + left_w, left_y + left_h)
+        left_bbox = left_bbox or left_page.rect
+        right_bbox = right_bbox or right_page.rect
 
-        right_w = right_bbox.width * right_scale
-        right_h = right_bbox.height * right_scale
-        right_x = half_width + margin + (half_width - 2 * margin - right_w) / 2
-        right_y = margin + (avail_height - right_h) / 2
-        right_dest = fitz.Rect(right_x, right_y, right_x + right_w, right_y + right_h)
+        def compute_dest(bbox, is_left):
+            scale = min(avail_width / bbox.width, avail_height / bbox.height, 1.0)
+            scale = max(scale, 0.4)
+            w = bbox.width * scale
+            h = bbox.height * scale
+            x_base = margin if is_left else half_width + margin
+            x = x_base + (half_width - 2 * margin - w) / 2
+            y = margin + (a4_height - 2 * margin - h) / 2
+            return fitz.Rect(x, y, x + w, y + h)
 
-        rotate_degrees = 180 if idx % 2 == 0 else 0
+        left_dest = compute_dest(left_bbox, is_left=True)
+        right_dest = compute_dest(right_bbox, is_left=False)
 
-        if rotate_degrees == 180:
-            # Rotated page positions swapped for correct reading order
+        rotate = 180 if idx % 2 == 0 else 0
+
+        def render(page_idx, dest, bbox, use_clip):
             try:
-                new_page.show_pdf_page(right_dest, doc, left_idx, clip=left_bbox, rotate=rotate_degrees)
+                if use_clip:
+                    new_page.show_pdf_page(dest, doc, page_idx, clip=bbox, rotate=rotate)
+                else:
+                    new_page.show_pdf_page(dest, doc, page_idx, rotate=rotate)
             except Exception as e:
-                print(f"   ❌ Error rendering left page {left_idx} (rotated): {e}")
+                print(f"❌ Failed to render page {page_idx}: {e}")
 
-            try:
-                new_page.show_pdf_page(left_dest, doc, right_idx, clip=right_bbox, rotate=rotate_degrees)
-            except Exception as e:
-                print(f"   ❌ Error rendering right page {right_idx} (rotated): {e}")
+        if rotate == 180:
+            render(left_idx, right_dest, left_bbox, use_clip_left)
+            render(right_idx, left_dest, right_bbox, use_clip_right)
         else:
-            try:
-                new_page.show_pdf_page(left_dest, doc, left_idx, clip=left_bbox, rotate=rotate_degrees)
-            except Exception as e:
-                print(f"   ❌ Error rendering left page {left_idx}: {e}")
-
-            try:
-                new_page.show_pdf_page(right_dest, doc, right_idx, clip=right_bbox, rotate=rotate_degrees)
-            except Exception as e:
-                print(f"   ❌ Error rendering right page {right_idx}: {e}")
+            render(left_idx, left_dest, left_bbox, use_clip_left)
+            render(right_idx, right_dest, right_bbox, use_clip_right)
 
     if add_watermark:
         add_watermark_to_first_page(booklet_doc)
 
     booklet_doc.save(output_pdf_path)
-    print(f"✅ Booklet PDF saved: {output_pdf_path}")
+    print(f"✅ Booklet saved: {output_pdf_path}")
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("Usage: python booklet_pymupdf.py input.pdf output.pdf")
+        print("Usage: python booklet.py input.pdf output.pdf")
         sys.exit(1)
 
-    create_booklet(sys.argv[1], sys.argv[2], add_watermark=False)
+    create_booklet(sys.argv[1], sys.argv[2])
 
