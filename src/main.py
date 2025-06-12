@@ -23,8 +23,8 @@ def clear_folder(folder_path):
     os.makedirs(folder_path)
 
 
-def run_split_pdf(input_pdf_path, add_initial_page_mode='add_if_needed', max_pages_per_split=40):
-    split_pdf(input_pdf_path, add_initial_page_mode=add_initial_page_mode, max_pages_per_split=max_pages_per_split)
+def run_split_pdf(input_pdf_path, same_page_parity=True, max_pages_per_split=40):
+    split_pdf(input_pdf_path, same_page_parity=same_page_parity, max_pages_per_split=max_pages_per_split)
 
 
 def process_splits(margin_cm=1.0):
@@ -53,15 +53,26 @@ def main():
     parser = argparse.ArgumentParser(description="Procesar un PDF y generar un booklet combinado.")
     parser.add_argument("input_pdf", help="Ruta al archivo PDF de entrada.")
     parser.add_argument("--output", "-o", type=str, help="Ruta al archivo PDF de salida (opcional).")
-    parser.add_argument("--max_pages_per_split", "-max", type=int, default=40, help="máximo número de páginas en cada booklet")
-    parser.add_argument("--add_initial_page_mode", "-a", type=str, help="add_if_needed -> Añade página al principio de documento si encuentra que hay una portada de distinto tamaño\n not_add -> no la añade\n add_forcing -> la añade siempre")
+    parser.add_argument("--max_pages_per_split", "-max", type=int, default=40, help="Máximo número de páginas en cada booklet")
+    parser.add_argument("--same_page_parity", "-spp", type=str, default="true",
+                        help="Si es 'true' cada split empieza en página impar (1-based). "
+                             "Si es 'false' añade página en blanco al principio y splits empiezan en página par.")
     parser.add_argument("--margin", "-m", type=float, default=1.0, help="Margen en cm a dejar (default: 1.0)")
 
     args = parser.parse_args()
 
     input_pdf = args.input_pdf
-    add_initial_page_mode = args.add_initial_page_mode 
     max_pages_per_split = args.max_pages_per_split
+
+    # Parseamos same_page_parity a booleano
+    spp_str = args.same_page_parity.lower()
+    if spp_str == "true":
+        same_page_parity = True
+    elif spp_str == "false":
+        same_page_parity = False
+    else:
+        print(f"Valor inválido para --same_page_parity: {args.same_page_parity}. Debe ser 'true' o 'false'.")
+        sys.exit(1)
 
     if not os.path.isfile(input_pdf):
         print(f"Error: No se encontró el archivo: {input_pdf}")
@@ -82,7 +93,7 @@ def main():
     clear_folder(BOOKLETS_DIR)
 
     print("Rompiendo en pdfs y añadiendo marcas de agua")
-    run_split_pdf(input_pdf, add_initial_page_mode=add_initial_page_mode, max_pages_per_split=max_pages_per_split)
+    run_split_pdf(input_pdf, same_page_parity=same_page_parity, max_pages_per_split=max_pages_per_split)
 
     print("Procesando splits para crear booklets...")
     process_splits(margin_cm=margin_cm)

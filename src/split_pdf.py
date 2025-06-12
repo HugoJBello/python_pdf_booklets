@@ -1,79 +1,91 @@
 import sys
 import os
 import fitz  # PyMuPDF
+import tempfile
 
 # ===== CONFIGURATION =====
-MAX_PAGES_PER_SPLIT = 40  # Recommended to be even for best results
+MAX_PAGES_PER_SPLIT = 40  # Ajustable
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "splits")
 
 def ensure_output_dir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def create_blank_page_like(page):
-    """Creates a blank page document matching the size of `page`. (Kept for compatibility, not used here)"""
+    """Crea un documento PDF con una página en blanco del tamaño de `page`."""
     blank_doc = fitz.open()
     blank_doc.new_page(width=page.rect.width, height=page.rect.height)
     return blank_doc
 
-def needs_extra_page(doc):
-    """Checks if first and second pages have different sizes."""
-    if len(doc) < 2:
-        return False
-    return doc[0].rect != doc[1].rect
-
-def split_pdf(input_pdf_path, add_initial_page_mode='add_if_needed', max_pages_per_split=MAX_PAGES_PER_SPLIT):
+def split_pdf(input_pdf_path, max_pages_per_split=MAX_PAGES_PER_SPLIT, same_page_parity=True):
     """
-    Splits the PDF into parts ensuring each split starts on an even page (human count), i.e. odd 0-based index,
-    but keeps the first split starting on page 0 (cover).
+    Divide el PDF en partes, con el máximo de páginas por split.
 
-    Parameters:
-    - input_pdf_path: path to the original PDF
-    - add_initial_page_mode: 'add_forcing', 'not_add' or 'add_if_needed' (default)
-    - max_pages_per_split: max pages per split chunk (adjusted dynamically to keep splits starting on even pages)
+    Parámetros:
+    - input_pdf_path: ruta al PDF original
+    - max_pages_per_split: máximo de páginas por split
+    - same_page_parity: booleano
+        * True: cada split empieza en página par (índice 0-based), excepto el primero que empieza en 0
+        * False: añade página en blanco al principio (archivo temporal) y trabaja con este
     """
     if not os.path.isfile(input_pdf_path):
-        print(f"Error: The file '{input_pdf_path}' does not exist.")
+        print(f"Error: el archivo '{input_pdf_path}' no existe.")
         return
 
-    doc = fitz.open(input_pdf_path)
-    ensure_output_dir()
+    doc_path_to_use = input_pdf_path
+    temp_doc = None
+    temp_file = None
 
-    # Decide if add extra page at start of first split
-    if add_initial_page_mode == 'add_forcing':
-        insert_extra_page_first = True
-    elif add_initial_page_mode == 'not_add':
-        insert_extra_page_first = False
-    else:  # add_if_needed
-        insert_extra_page_first = needs_extra_page(doc)
+    if not same_page_parity:
+        # Crear PDF temporal con página en blanco al principio
+        doc_orig = fitz.open(input_pdf_path)
+        temp_doc = fitz.open()
+
+        if len(doc_orig) == 0:
+            print("Error: PDF vacío.")
+            return
+        
+        # Crear página en blanco del tamaño de la primera página
+        blank_doc = create_blank_page_like(doc_orig[0])
+        temp_doc.insert_pdf(blank_doc)
+        blank_doc.close()
+        # Insertar todas las páginas originales después
+        temp_doc.insert_pdf(doc_orig)
+        doc_orig.close()
+
+        # Guardar temporal
+        temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, dir=os.path.dirname(input_pdf_path))
+        temp_doc.save(temp_file.name)
+        temp_doc.close()
+        doc_path_to_use = temp_file.name
+        print(f"Archivo temporal creado con página en blanco: {doc_path_to_use}")
+
+    doc = fitz.open(doc_path_to_use)
+    ensure_output_dir()
 
     total_pages = len(doc)
     split_count = 0
-    current_index = 0
+    current_index = 0  # Empezamos siempre desde la página 0
 
     while current_index < total_pages:
         split = fitz.open()
 
-        # Insert blank page at start of first split if needed
-        if split_count == 0 and insert_extra_page_first:
-            ref_page = doc[1] if total_pages > 1 else doc[0]
-            blank_doc = create_blank_page_like(ref_page)
-            split.insert_pdf(blank_doc)
-            blank_doc.close()
-
-        # For splits after the first, ensure starting index is odd (0-based) = even human page number
-        if split_count > 0 and current_index % 2 == 0:
-            print(f"Adjusting start index from {current_index} (even) to {current_index + 1} (odd)")
+        # Excepto para el primer split, aseguramos que current_index sea par (índice base 0 par)
+        if split_count > 0 and current_index % 2 == 1:
             current_index += 1
             if current_index >= total_pages:
                 break
 
         to_page = min(current_index + max_pages_per_split - 1, total_pages - 1)
-        next_start = to_page + 1
 
-        # Adjust to_page so next split starts on odd index if not last page
-        if next_start < total_pages and next_start % 2 == 0:
-            if to_page + 1 < total_pages:
-                to_page += 1
+        # Ajustamos to_page para que el siguiente split empiece en página par (índice base 0 par)
+        next_start = to_page + 1
+        if next_start < total_pages and next_start % 2 == 1:
+            # Si la siguiente página es impar, retrocedemos para que el próximo split comience en par
+            to_page -= 1
+
+        # Evitamos que to_page quede antes que current_index
+        if to_page < current_index:
+            to_page = current_index
 
         split.insert_pdf(doc, from_page=current_index, to_page=to_page)
 
@@ -82,28 +94,42 @@ def split_pdf(input_pdf_path, add_initial_page_mode='add_if_needed', max_pages_p
         split.save(output_path)
         split.close()
 
-        print(f"Saved split {split_count}: pages {current_index + 1} to {to_page + 1} (1-based numbering)")
+        print(f"Guardado split {split_count}: páginas {current_index + 1} a {to_page + 1} (base 1)")
 
         current_index = to_page + 1
 
     doc.close()
-    print(f"✅ PDF split into {split_count} parts.")
+
+    # Borrar archivo temporal si se creó
+    if temp_file is not None:
+        try:
+            os.remove(doc_path_to_use)
+            print(f"Archivo temporal borrado: {doc_path_to_use}")
+        except Exception as e:
+            print(f"No se pudo borrar el archivo temporal: {e}")
+
+    print(f"✅ PDF dividido en {split_count} partes.")
+
 
 if __name__ == "__main__":
     if len(sys.argv) not in [2, 3]:
-        print("Usage: python split_pdf.py <input_pdf> [add_initial_page_mode]")
-        print("Optional add_initial_page_mode: 'add_forcing', 'not_add', 'add_if_needed'")
+        print("Uso: python split_pdf.py <input_pdf> [same_page_parity]")
+        print("same_page_parity opcional: 'true' o 'false' (default true)")
         sys.exit(1)
 
     input_path = sys.argv[1]
 
     if len(sys.argv) == 3:
-        mode = sys.argv[2]
-        if mode not in ['add_forcing', 'not_add', 'add_if_needed']:
-            print(f"Invalid mode: {mode}")
+        mode = sys.argv[2].lower()
+        if mode == 'true':
+            same_page_parity = True
+        elif mode == 'false':
+            same_page_parity = False
+        else:
+            print(f"Parámetro inválido para same_page_parity: {sys.argv[2]}")
             sys.exit(1)
     else:
-        mode = 'add_if_needed'
+        same_page_parity = True
 
-    split_pdf(input_path, add_initial_page_mode=mode)
+    split_pdf(input_path, max_pages_per_split=MAX_PAGES_PER_SPLIT, same_page_parity=same_page_parity)
 
