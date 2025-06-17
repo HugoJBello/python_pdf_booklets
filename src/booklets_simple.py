@@ -5,36 +5,16 @@ import sys
 from pathlib import Path
 
 def detect_content_bbox(page, margin_pts):
-    content_rects = []
-
-    # --- 1. Bloques de texto
-    for block in page.get_text("blocks"):
-        content_rects.append(fitz.Rect(block[:4]))
-
-    # --- 2. Imágenes (detectadas en contenido crudo)
-    raw_dict = page.get_text("rawdict")
-    for block in raw_dict.get("blocks", []):
-        if block.get("type") == 1 and "bbox" in block:
-            content_rects.append(fitz.Rect(block["bbox"]))
-
-    # --- 3. Dibujos (líneas, rectángulos, etc.)
-    for item in page.get_drawings():
-        rect = item.get("rect")
-        if rect and rect.is_valid:
-            content_rects.append(rect)
-
-    # --- Si no se detectó nada, devolver toda la página
-    if not content_rects:
+    blocks = page.get_text("blocks")
+    if not blocks:
+        # Página sin texto, devuelve toda la página
         return page.rect
-
-    # --- Combinar todos los rectángulos
-    x0 = min(r.x0 for r in content_rects)
-    y0 = min(r.y0 for r in content_rects)
-    x1 = max(r.x1 for r in content_rects)
-    y1 = max(r.y1 for r in content_rects)
+    x0 = min(b[0] for b in blocks)
+    y0 = min(b[1] for b in blocks)
+    x1 = max(b[2] for b in blocks)
+    y1 = max(b[3] for b in blocks)
     bbox = fitz.Rect(x0, y0, x1, y1)
 
-    # --- Aplicar margen externo (respetando límites de página)
     clip_rect = fitz.Rect(
         max(bbox.x0 - margin_pts, 0),
         max(bbox.y0 - margin_pts, 0),
@@ -42,7 +22,9 @@ def detect_content_bbox(page, margin_pts):
         min(bbox.y1 + margin_pts, page.rect.height),
     )
 
-    return clip_rect if clip_rect.is_valid else page.rect
+    if clip_rect.is_empty or clip_rect.width <= 0 or clip_rect.height <= 0:
+        return page.rect
+    return clip_rect
 
 def add_watermark_to_first_page(doc):
     if len(doc) == 0:

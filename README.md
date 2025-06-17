@@ -13,3 +13,4 @@ Then
 
     python3 src/main.py libro.pdf output.pdf -m 0.5 --same_page_parity true
 
+    python3 src/booklets.py libro.pdf -o output.pdf -m 0.5
